@@ -101,9 +101,8 @@ class ProtoMIL_GlobalPrototype(nn.Module):
                 nn.Linear(hidden_dim, 1)
             )
 
-        # 全局原型（将在训练时设置）
-        self.register_buffer('global_prototypes', torch.zeros(num_classes, instance_dim))
-        self.prototypes_initialized = False
+        # 修改为可学习的参数 (nn.Parameter)，使用正态分布随机初始化
+        self.global_prototypes = nn.Parameter(torch.randn(num_classes, instance_dim))
 
     def extract_bag_features(self, images):
         """
@@ -114,20 +113,6 @@ class ProtoMIL_GlobalPrototype(nn.Module):
             features: [N, instance_dim] 特征向量
         """
         return self.feature_extractor(images)
-
-    def set_global_prototypes(self, global_proto_tensor):
-        """
-        设置全局原型（不参与反向传播）
-        Args:
-            global_proto_tensor: [num_classes, D]
-        """
-        if global_proto_tensor.shape[0] != self.num_classes:
-            raise ValueError(f"原型数量不匹配: 期望{self.num_classes}, 得到{global_proto_tensor.shape[0]}")
-        if global_proto_tensor.shape[1] != self.instance_dim:
-            raise ValueError(f"原型维度不匹配: 期望{self.instance_dim}, 得到{global_proto_tensor.shape[1]}")
-
-        self.global_prototypes.copy_(global_proto_tensor.detach())
-        self.prototypes_initialized = True
 
     def compute_prototype(self, feats):
         """
@@ -174,9 +159,6 @@ class ProtoMIL_GlobalPrototype(nn.Module):
         Returns:
             similarity: [B, num_classes] 或 [num_classes] 相似度得分
         """
-        if not self.prototypes_initialized:
-            raise ValueError("全局原型尚未初始化！请先调用 set_global_prototypes()")
-
         # 处理单个原型的情况
         if proto.dim() == 1:
             proto = proto.unsqueeze(0)  # [1, D]
@@ -409,69 +391,6 @@ def compute_metrics(y_true, y_pred, y_prob):
     }
 
 
-# ============ 原型计算函数 ============
-
-def compute_global_prototypes(model, loader, device, num_classes=2):
-    """
-    计算每个类的全局原型
-    Args:
-        model: ProtoMIL模型
-        loader: DataLoader
-        device: 计算设备
-        num_classes: 类别数
-    Returns:
-        global_prototypes: [num_classes, D]
-    """
-    print(f"\n🔧 开始计算全局原型...")
-
-    model.eval()
-
-    # 存储每个类的所有原型
-    class_prototypes = {i: [] for i in range(num_classes)}
-    class_counts = {i: 0 for i in range(num_classes)}
-
-    with torch.no_grad():
-        for batch_idx, (images, labels, lengths) in enumerate(tqdm(loader, desc="计算原型")):
-            images, labels = images.to(device), labels.to(device)
-
-            # 处理每个bag
-            for i in range(images.size(0)):
-                bag_images = images[i, :lengths[i]]  # [N, C, H, W]
-                bag_label = labels[i].item()
-                
-                # 提取特征
-                features = model.feature_extractor(bag_images)  # [N, D]
-                
-                # 计算原型
-                proto, _ = model.compute_prototype(features)  # [D]
-                
-                class_prototypes[bag_label].append(proto)
-                class_counts[bag_label] += 1
-
-    # 打印每个类的样本数
-    print(f"类别样本分布:")
-    for class_id in range(num_classes):
-        print(f"  - 类别 {class_id}: {class_counts[class_id]} 个样本")
-
-    # 计算每个类的平均原型
-    global_prototypes = []
-    for class_id in range(num_classes):
-        if len(class_prototypes[class_id]) > 0:
-            class_proto = torch.stack(class_prototypes[class_id]).mean(dim=0)
-            global_prototypes.append(class_proto)
-        else:
-            # 如果某个类没有样本，使用随机初始化
-            print(f"⚠️ 警告: 类别 {class_id} 没有样本，使用随机初始化")
-            random_proto = torch.randn(model.instance_dim).to(device)
-            global_prototypes.append(random_proto)
-
-    global_prototypes = torch.stack(global_prototypes)  # [num_classes, D]
-
-    print(f"✅ 全局原型计算完成: {global_prototypes.shape}\n")
-
-    return global_prototypes
-
-
 # ============ 训练与验证函数 ============
 
 def train_one_epoch(model, loader, optimizer, criterion, device, writer, epoch):
@@ -637,7 +556,7 @@ def evaluate(model, loader, criterion, device, writer, epoch):
 
 def main(train_dir, val_dir, log_dir='runs/protomil_experiment', 
          resnet_model='resnet50', feature_dim=512, batch_size=8, 
-         epochs=50, lr=1e-4, update_proto_freq=5, max_instances=None):
+         epochs=50, lr=1e-4, max_instances=None):
     print(f"\n{'=' * 70}")
     print(f"🚀 开始训练 ProtoMIL_GlobalPrototype 模型 (图像版本)")
     print(f"{'=' * 70}")
@@ -650,7 +569,6 @@ def main(train_dir, val_dir, log_dir='runs/protomil_experiment',
     print(f"  - Batch Size: {batch_size}")
     print(f"  - Epochs: {epochs}")
     print(f"  - Learning Rate: {lr}")
-    print(f"  - 原型更新频率: 每 {update_proto_freq} epochs")
     print(f"  - 最大Instance数: {max_instances if max_instances else '无限制'}")
     print(f"{'=' * 70}\n")
 
@@ -718,12 +636,6 @@ def main(train_dir, val_dir, log_dir='runs/protomil_experiment',
     print(f"  - 总参数量: {total_params:,}")
     print(f"  - 可训练参数: {trainable_params:,}\n")
 
-    # 初始化全局原型
-    print("🔧 初始化全局原型...")
-    global_prototypes = compute_global_prototypes(model, train_loader, device, num_classes=2)
-    model.set_global_prototypes(global_prototypes)
-    print(f"✅ 全局原型初始化完成\n")
-
     # 优化器 & 损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
@@ -750,12 +662,6 @@ def main(train_dir, val_dir, log_dir='runs/protomil_experiment',
         print(f"\n{'=' * 70}")
         print(f"Epoch {epoch}/{epochs}")
         print(f"{'=' * 70}")
-
-        # 定期更新全局原型
-        if epoch > 1 and epoch % update_proto_freq == 0:
-            print(f"🔄 更新全局原型...")
-            global_prototypes = compute_global_prototypes(model, train_loader, device, num_classes=2)
-            model.set_global_prototypes(global_prototypes)
 
         # 训练阶段
         train_loss, train_metrics = train_one_epoch(
@@ -847,12 +753,10 @@ if __name__ == "__main__":
                         help="Number of epochs to train")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate")
-    parser.add_argument("--update_proto_freq", type=int, default=1,
-                        help="Frequency of updating global prototypes (in epochs)")
     parser.add_argument("--max_instances", type=int, default=None,
                         help="Maximum number of instances per bag (None for unlimited)")
 
     args = parser.parse_args()
     main(args.train_dir, args.val_dir, args.log_dir, args.resnet_model,
          args.feature_dim, args.batch_size, args.epochs, args.lr, 
-         args.update_proto_freq, args.max_instances)
+         args.max_instances)
