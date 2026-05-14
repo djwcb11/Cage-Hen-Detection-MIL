@@ -25,3 +25,9 @@
 > - Python ≥ 3.10
 > - PyTorch ≥ 1.13
 > - CUDA ≥ 11.7
+>
+> ### data available
+> https://universe.roboflow.com/zhejiang-university-txg5o/
+chicken-counting-o45ko
+> https:
+//universe.roboflow.com/zhejiang-university-txg5o/egg-fqisy
